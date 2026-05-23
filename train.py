@@ -52,11 +52,12 @@ class CandlestickDataset(Dataset):
             raise FileNotFoundError(f"Error loading image {img_path}: {e}")
 
         label = int(row["target_label"])
+        pct_change = float(row["pct_change"])
 
         if self.transform:
             image = self.transform(image)
 
-        return image, label
+        return image, label, pct_change
 
 # ==========================================
 # TRAINING AND VALIDATION PIPELINE
@@ -123,7 +124,7 @@ def train_model(config: TrainConfig):
     model = model.to(device)
 
     # Loss function and Optimizer
-    criterion = nn.CrossEntropyLoss()
+    criterion_none = nn.CrossEntropyLoss(reduction='none')
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
 
     best_val_loss = float("inf")
@@ -137,15 +138,19 @@ def train_model(config: TrainConfig):
         train_corrects = 0
         total_train_samples = 0
 
-        for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
+        for inputs, labels, pct_changes in train_loader:
+            inputs, labels, pct_changes = inputs.to(device), labels.to(device), pct_changes.to(device).float()
 
             # Zero the parameter gradients
             optimizer.zero_grad()
 
             # Forward pass
             outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            
+            # Custom Return-Magnitude Weighted Loss
+            raw_loss = criterion_none(outputs, labels)
+            loss_weights = 1.0 + 5.0 * torch.abs(pct_changes)
+            loss = torch.mean(raw_loss * loss_weights)
             
             # Backward pass & Optimize
             loss.backward()
@@ -167,12 +172,16 @@ def train_model(config: TrainConfig):
         total_val_samples = 0
 
         with torch.no_grad():
-            for inputs, labels in val_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
+            for inputs, labels, pct_changes in val_loader:
+                inputs, labels, pct_changes = inputs.to(device), labels.to(device), pct_changes.to(device).float()
 
                 # Forward pass
                 outputs = model(inputs)
-                loss = criterion(outputs, labels)
+                
+                # Custom Return-Magnitude Weighted Loss
+                raw_loss = criterion_none(outputs, labels)
+                loss_weights = 1.0 + 5.0 * torch.abs(pct_changes)
+                loss = torch.mean(raw_loss * loss_weights)
 
                 # Statistics tracking
                 _, preds = torch.max(outputs, 1)

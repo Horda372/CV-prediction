@@ -116,9 +116,17 @@ def generate_dataset_from_csv(config: CSVConfig):
                 for ma in config.moving_averages:
                     df[f'SMA_{ma}'] = df['Close'].rolling(window=ma).mean()
 
-            # Trim data to eliminate initial rolling NaN rows
+            # Calculate rolling 14-day Average True Range (ATR)
+            high_low = df['High'] - df['Low']
+            high_close_prev = (df['High'] - df['Close'].shift(1)).abs()
+            low_close_prev = (df['Low'] - df['Close'].shift(1)).abs()
+            df['TR'] = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+            df['ATR'] = df['TR'].rolling(window=14).mean()
+
+            # Trim data to eliminate initial rolling NaN rows (SMAs and 14-day ATR)
             max_ma = max(config.moving_averages) if config.moving_averages else 0
-            df = df.iloc[max_ma:].copy()
+            trim_start = max(max_ma, 15)  # 15 to account for 14-day rolling window + 1 shift row
+            df = df.iloc[trim_start:].copy()
             
             total_rows = len(df)
             # Available samples considering sliding window and future forecast horizon
@@ -143,15 +151,46 @@ def generate_dataset_from_csv(config: CSVConfig):
                     
                     window_data = df.iloc[start_idx:end_idx].copy()
                     
-                    # --- CLASSIFICATION LOGIC (TARGET LABEL) ---
+                    # --- TRIPLE BARRIER CLASSIFICATION LOGIC ---
                     current_close = window_data['Close'].iloc[-1]
-                    future_idx = end_idx - 1 + config.forecast_horizon
-                    future_close = df['Close'].iloc[future_idx]
+                    current_atr = window_data['ATR'].iloc[-1]
                     
-                    pct_change = ((future_close - current_close) / current_close) * 100.0 if current_close > 0 else 0
+                    barrier_upper = current_close + 2.0 * current_atr
+                    barrier_lower = current_close - 1.0 * current_atr
                     
-                    # 1 = success (growth >= threshold), 0 = no-buy
-                    target_label = 1 if pct_change >= config.target_threshold_pct else 0
+                    future_block = df.iloc[end_idx : end_idx + config.forecast_horizon]
+                    
+                    target_label = 0
+                    future_close = current_close
+                    pct_change = 0.0
+                    barrier_touched = False
+                    
+                    for idx_future, future_row in future_block.iterrows():
+                        f_high = future_row['High']
+                        f_low = future_row['Low']
+                        f_close = future_row['Close']
+                        
+                        # 1. Check Stop-Loss first (Conservative Risk Management)
+                        if f_low <= barrier_lower:
+                            target_label = 0
+                            future_close = barrier_lower
+                            pct_change = ((barrier_lower - current_close) / current_close) * 100.0 if current_close > 0 else 0
+                            barrier_touched = True
+                            break
+                            
+                        # 2. Check Profit-Take
+                        if f_high >= barrier_upper:
+                            target_label = 1
+                            future_close = barrier_upper
+                            pct_change = ((barrier_upper - current_close) / current_close) * 100.0 if current_close > 0 else 0
+                            barrier_touched = True
+                            break
+                            
+                    if not barrier_touched:
+                        # Timed out (Vertical barrier) -> Class 0 (No-Buy)
+                        target_label = 0
+                        future_close = future_block['Close'].iloc[-1] if len(future_block) > 0 else current_close
+                        pct_change = ((future_close - current_close) / current_close) * 100.0 if current_close > 0 else 0
 
                     if target_label == 1:
                         class_1_count += 1
