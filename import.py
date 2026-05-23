@@ -1,4 +1,4 @@
-import yfinance as yf
+import MetaTrader5 as mt5
 import mplfinance as mpf
 import pandas as pd
 import os
@@ -11,8 +11,8 @@ from dataclasses import dataclass, field
 # ==========================================
 @dataclass
 class Config:
-    # List of stock symbols to fetch
-    symbols: List[str] = field(default_factory=lambda: ["AAPL", "TSLA", "BTC-USD"])
+    # List of symbols to fetch (Make sure they are available in your MT5 broker)
+    symbols: List[str] = field(default_factory=lambda: ["EURUSD", "GBPUSD", "USDJPY"])
     
     # Window size (number of candles in a single generated image)
     window_size: int = 20
@@ -20,8 +20,8 @@ class Config:
     # Number of images to generate for each symbol
     num_images_per_symbol: int = 5
     
-    # Timeframe (e.g., '1d' for days, '1h' for hours)
-    timeframe: str = "1d"
+    # Timeframe (e.g., '1m', '5m', '15m', '1h', '4h', '1d', '1w')
+    timeframe: str = "1h"
     
     # Name of the main output directory
     output_dir: str = "dataset_market_cv"
@@ -36,16 +36,40 @@ class Config:
     forecast_horizon: int = 5
     
     # Minimum percentage growth required to assign label "1" (success/buy)
-    target_threshold_pct: float = 5.0
+    # Lowered default since Forex/intraday moves in smaller percentages
+    target_threshold_pct: float = 0.2
+
+# Timeframe mapping for MT5
+TIMEFRAME_MAPPING = {
+    "1m": mt5.TIMEFRAME_M1,
+    "5m": mt5.TIMEFRAME_M5,
+    "15m": mt5.TIMEFRAME_M15,
+    "1h": mt5.TIMEFRAME_H1,
+    "4h": mt5.TIMEFRAME_H4,
+    "1d": mt5.TIMEFRAME_D1,
+    "1w": mt5.TIMEFRAME_W1,
+}
 
 # ==========================================
 # MAIN SCRIPT LOGIC
 # ==========================================
 def generate_dataset_with_metadata(config: Config):
     """
-    Fetches market data, generates candlestick chart images, and creates a metadata file
-    based on the provided configuration.
+    Fetches market data via MetaTrader5, generates candlestick chart images, 
+    and creates a metadata file based on the provided configuration.
     """
+    if config.timeframe not in TIMEFRAME_MAPPING:
+        print(f"Error: Unsupported timeframe '{config.timeframe}'. Use one of {list(TIMEFRAME_MAPPING.keys())}")
+        return
+
+    mt5_timeframe = TIMEFRAME_MAPPING[config.timeframe]
+
+    # Initialize MT5 connection
+    if not mt5.initialize():
+        print(f"MT5 initialize() failed, error code = {mt5.last_error()}")
+        return
+        
+    print(f"MetaTrader5 initialized successfully. Terminal version: {mt5.version()}")
     
     # Create directory structure
     images_dir = os.path.join(config.output_dir, "images")
@@ -73,20 +97,29 @@ def generate_dataset_with_metadata(config: Config):
     max_ma = max(config.moving_averages) if config.moving_averages else 0
     required_rows = (config.num_images_per_symbol - 1) + config.window_size + config.forecast_horizon
     fetch_buffer = max_ma + required_rows
-    
-    # Determine fetch period for yfinance based on timeframe
-    fetch_period = "2y" if config.timeframe == "1d" else "60d" 
 
     for symbol in config.symbols:
         print(f"\nProcessing: {symbol} (Timeframe: {config.timeframe})...")
         try:
-            ticker = yf.Ticker(symbol)
-            df = ticker.history(period=fetch_period, interval=config.timeframe)
+            # Ensure the symbol is visible in Market Watch
+            if not mt5.symbol_select(symbol, True):
+                print(f"Warning: Failed to select symbol {symbol} in MT5. It may not exist in your broker. Skipping.")
+                continue
+
+            # Fetch historical data directly from MetaTrader 5
+            # We fetch 'fetch_buffer' number of candles from the current time backwards
+            rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, fetch_buffer)
             
-            if df.empty or len(df) < fetch_buffer:
-                print(f"Warning: Insufficient data for {symbol}. Skipping.")
+            if rates is None or len(rates) < fetch_buffer:
+                print(f"Warning: Insufficient data for {symbol} (Got {len(rates) if rates is not None else 0}, needed {fetch_buffer}). Skipping.")
                 continue
                 
+            # Convert to Pandas DataFrame
+            df = pd.DataFrame(rates)
+            df['time'] = pd.to_datetime(df['time'], unit='s')
+            df.set_index('time', inplace=True)
+            df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'tick_volume': 'Volume'}, inplace=True)
+            
             # Calculate technical indicators before trimming data
             if config.moving_averages:
                 for ma in config.moving_averages:
@@ -129,8 +162,8 @@ def generate_dataset_with_metadata(config: Config):
                     # Extract metadata for verification
                     start_date = window_data.index[0].strftime("%Y-%m-%d %H:%M:%S")
                     end_date = window_data.index[-1].strftime("%Y-%m-%d %H:%M:%S")
-                    start_close = round(window_data['Close'].iloc[0], 4)
-                    end_close = round(current_close, 4)
+                    start_close = round(window_data['Close'].iloc[0], 5)
+                    end_close = round(current_close, 5)
                     
                     # --- NORMALIZATION (Min-Max 0-1) ---
                     if config.normalize_data:
@@ -173,7 +206,7 @@ def generate_dataset_with_metadata(config: Config):
                     writer.writerow([
                         filename, symbol, config.timeframe, config.window_size, 
                         start_date, end_date, start_close, end_close,
-                        target_label, round(future_close, 4), round(pct_change, 2)
+                        target_label, round(future_close, 5), round(pct_change, 3)
                     ])
                     generated_count += 1
                     
@@ -181,6 +214,9 @@ def generate_dataset_with_metadata(config: Config):
             
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
+
+    # Shutdown MT5 connection after loop finishes
+    mt5.shutdown()
 
 if __name__ == "__main__":
     # Initialize configuration (default values defined in the class above)
