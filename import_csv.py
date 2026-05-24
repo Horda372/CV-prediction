@@ -15,7 +15,7 @@ class CSVConfig:
     csv_dir: str = "market_data"
     
     # List of symbols to process (corresponds to {symbol}_1d.csv)
-    symbols: List[str] = field(default_factory=lambda: ["EURUSD", "GBPUSD", "USDJPY"])
+    symbols: List[str] = field(default_factory=lambda: ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD", "EURGBP", "EURJPY", "GBPJPY"])
     
     # Window size (number of candles in a single generated image)
     window_size: int = 20
@@ -35,9 +35,8 @@ class CSVConfig:
     # Forecast horizon (how many periods ahead we check to assign a label)
     forecast_horizon: int = 5
     
-    # Minimum percentage growth required to assign label "1" (success/buy)
-    # 1.0% as selected in the /grill-me session
-    target_threshold_pct: float = 1.0
+    # Volatility multiplier (number of standard deviations above standard window volatility)
+    target_volatility_multiplier: float = 1.5
 
 # ==========================================
 # MAIN CSV PROCESSING LOGIC
@@ -143,15 +142,28 @@ def generate_dataset_from_csv(config: CSVConfig):
                     
                     window_data = df.iloc[start_idx:end_idx].copy()
                     
-                    # --- CLASSIFICATION LOGIC (TARGET LABEL) ---
+                    # --- CLASSIFICATION LOGIC (VOLATILITY-ADJUSTED TARGET LABEL) ---
                     current_close = window_data['Close'].iloc[-1]
                     future_idx = end_idx - 1 + config.forecast_horizon
                     future_close = df['Close'].iloc[future_idx]
                     
                     pct_change = ((future_close - current_close) / current_close) * 100.0 if current_close > 0 else 0
                     
-                    # 1 = success (growth >= threshold), 0 = no-buy
-                    target_label = 1 if pct_change >= config.target_threshold_pct else 0
+                    # Calculate rolling daily standard deviation inside the 20-candle window
+                    daily_returns = window_data['Close'].pct_change().dropna()
+                    daily_std = daily_returns.std() * 100.0 if len(daily_returns) > 0 else 0.0
+                    
+                    # Scale standard deviation by sqrt of forecast horizon to get horizon-level volatility
+                    import numpy as np
+                    horizon_volatility = daily_std * np.sqrt(config.forecast_horizon)
+                    
+                    # Calculate dynamic threshold based on volatility multiplier
+                    dynamic_threshold = config.target_volatility_multiplier * horizon_volatility
+                    # Impose a logical minimum threshold of 0.15% to prevent noise from triggering buy signals
+                    dynamic_threshold = max(dynamic_threshold, 0.15)
+                    
+                    # 1 = success (growth >= dynamic_threshold), 0 = no-buy
+                    target_label = 1 if pct_change >= dynamic_threshold else 0
 
                     if target_label == 1:
                         class_1_count += 1

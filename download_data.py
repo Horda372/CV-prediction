@@ -11,16 +11,23 @@ def download_forex_data():
     symbol_mapping = {
         "EURUSD=X": "EURUSD_1d.csv",
         "GBPUSD=X": "GBPUSD_1d.csv",
-        "USDJPY=X": "USDJPY_1d.csv"
+        "USDJPY=X": "USDJPY_1d.csv",
+        "AUDUSD=X": "AUDUSD_1d.csv",
+        "USDCAD=X": "USDCAD_1d.csv",
+        "USDCHF=X": "USDCHF_1d.csv",
+        "NZDUSD=X": "NZDUSD_1d.csv",
+        "EURGBP=X": "EURGBP_1d.csv",
+        "EURJPY=X": "EURJPY_1d.csv",
+        "GBPJPY=X": "GBPJPY_1d.csv"
     }
     
-    print(f"Downloading 5 years of historical daily price data into: {os.path.abspath(output_dir)}")
+    print(f"Downloading 10 years of historical daily price data into: {os.path.abspath(output_dir)}")
     
     for yf_symbol, filename in symbol_mapping.items():
         print(f"Fetching: {yf_symbol}...")
         try:
-            # Download daily data for 5 years
-            df = yf.download(yf_symbol, period="5y", interval="1d")
+            # Download daily data for 10 years
+            df = yf.download(yf_symbol, period="10y", interval="1d")
             
             if df.empty:
                 print(f"Warning: No data returned for {yf_symbol}. Skipping.")

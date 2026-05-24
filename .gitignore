@@ -1,0 +1,18 @@
+# Ignore market data downloaded from Yahoo Finance
+market_data/
+
+# Ignore generated candlestick image library and metadata
+dataset_market_cv/
+
+# Ignore PyTorch model weight binaries (weights are too large for Git)
+*.pth
+
+# Ignore local training history and log databases
+history.csv
+experiment_log.csv
+training_curves.png
+
+# Ignore Python bytecode and runtime caches
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
