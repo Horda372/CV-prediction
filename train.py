@@ -22,7 +22,12 @@ class TrainConfig:
     train_split_pct = 0.8
     num_classes = 2
     sampler_type = "weighted"  # "weighted" or "standard"
-    model_backbone = "custom_cnn"
+    model_backbone = "resnet18"
+    loss_type = "focal"  # "focal" or "cross_entropy"
+    focal_alpha = 0.75
+    focal_gamma = 2.0
+    early_stopping_patience = 3
+    transaction_cost = 0.05  # Transaction cost in % per trade (e.g. 0.05% = 5 pips)
     experiment_log_path = "experiment_log.csv"
     save_model_path = "best_model.pth"
     save_history_path = "history.csv"
@@ -76,6 +81,31 @@ class CustomCandlestickCNN(nn.Module):
         x = self.fc2(x)
         return x
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss designed to address extreme class imbalance by down-weighting easy-to-classify examples
+    and focusing the model on hard, rare minority examples (e.g., breakout signals).
+    """
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='none'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        self.ce = nn.CrossEntropyLoss(reduction='none')
+
+    def forward(self, inputs, targets):
+        logpt = -self.ce(inputs, targets)
+        pt = torch.exp(logpt)
+        alpha_t = torch.where(targets == 1, self.alpha, 1.0 - self.alpha)
+        focal_loss = -alpha_t * ((1.0 - pt) ** self.gamma) * logpt
+        
+        if self.reduction == 'mean':
+            return torch.mean(focal_loss)
+        elif self.reduction == 'sum':
+            return torch.sum(focal_loss)
+        else:
+            return focal_loss
+
 # ==========================================
 # CUSTOM DATASET
 # ==========================================
@@ -96,7 +126,6 @@ class CandlestickDataset(Dataset):
         img_name = row["filename"]
         img_path = os.path.join(self.img_dir, img_name)
         
-        # Load image and convert to RGB
         try:
             image = Image.open(img_path).convert("RGB")
         except Exception as e:
@@ -175,33 +204,57 @@ def train_model(config: TrainConfig):
         sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(sample_weights), replacement=True)
         
         # Pass sampler to DataLoader (shuffle must be False when using a sampler)
-        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, sampler=sampler, drop_last=False)
+        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, sampler=sampler, drop_last=False, num_workers=4, pin_memory=True)
         print(f"Using WeightedRandomSampler to balance batches (Class counts: {class_counts})")
     else:
         # Standard Loader
-        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, drop_last=False)
+        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, drop_last=False, num_workers=4, pin_memory=True)
         print("Using standard shuffled DataLoader (no batch balancing)")
 
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, drop_last=False)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, drop_last=False, num_workers=4, pin_memory=True)
 
-    # Initialize Custom Regularized CNN Model
-    print("Initializing CustomCandlestickCNN backbone from scratch...")
-    model = CustomCandlestickCNN(num_classes=config.num_classes, dropout_prob=0.3)
+    # Initialize Model Backbone
+    backbone = getattr(config, "model_backbone", "custom_cnn")
+    if backbone == "resnet18":
+        print("Initializing Pretrained ResNet18 backbone...")
+        weights = ResNet18_Weights.DEFAULT
+        model = resnet18(weights=weights)
+        
+        # Replace the fully connected layer with a regularized head (Dropout + Linear)
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Sequential(
+            nn.Dropout(p=0.4),  # Stronger dropout to prevent overfitting
+            nn.Linear(num_ftrs, config.num_classes)
+        )
+    else:
+        print("Initializing CustomCandlestickCNN backbone from scratch...")
+        model = CustomCandlestickCNN(num_classes=config.num_classes, dropout_prob=0.3)
+        
     model = model.to(device)
 
-    # Loss function and Optimizer
-    criterion_none = nn.CrossEntropyLoss(reduction='none')
+    # Loss function selection
+    if getattr(config, "loss_type", "cross_entropy") == "focal":
+        print(f"Using Focal Loss (alpha={config.focal_alpha}, gamma={config.focal_gamma})")
+        criterion_none = FocalLoss(alpha=config.focal_alpha, gamma=config.focal_gamma, reduction='none')
+    else:
+        print("Using Standard CrossEntropy Loss")
+        criterion_none = nn.CrossEntropyLoss(reduction='none')
+        
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
 
     best_val_loss = float("inf")
-    best_val_f1 = -1.0
+    best_val_return = -9999.0
     best_epoch = 0
+    best_threshold = 0.5
+    epochs_no_improve = 0
     best_metrics = {
         "val_loss": 0.0,
         "val_acc": 0.0,
         "val_precision": 0.0,
         "val_recall": 0.0,
-        "val_f1": 0.0
+        "val_f1": 0.0,
+        "best_threshold": 0.5,
+        "strategy_return": -9999.0
     }
     history = []
 
@@ -243,11 +296,11 @@ def train_model(config: TrainConfig):
         # --- VALIDATION PHASE ---
         model.eval()
         val_loss = 0.0
-        val_corrects = 0
         total_val_samples = 0
         
-        all_preds = []
+        all_probs = []
         all_labels = []
+        all_pct_changes = []
 
         with torch.no_grad():
             for inputs, labels, pct_changes in val_loader:
@@ -262,32 +315,66 @@ def train_model(config: TrainConfig):
                 loss = torch.mean(raw_loss * loss_weights)
 
                 # Statistics tracking
-                _, preds = torch.max(outputs, 1)
                 val_loss += loss.item() * inputs.size(0)
-                val_corrects += torch.sum(preds == labels.data).item()
                 total_val_samples += inputs.size(0)
                 
-                all_preds.extend(preds.cpu().tolist())
+                probs = torch.softmax(outputs, dim=1)
+                all_probs.extend(probs[:, 1].cpu().tolist())
                 all_labels.extend(labels.cpu().tolist())
+                all_pct_changes.extend(pct_changes.cpu().tolist())
 
         epoch_val_loss = val_loss / total_val_samples if total_val_samples > 0 else 0
-        epoch_val_acc = val_corrects / total_val_samples if total_val_samples > 0 else 0
 
-        # Calculate Precision, Recall, and F1-Score for validation split
-        tp = sum((p == 1 and l == 1) for p, l in zip(all_preds, all_labels))
-        fp = sum((p == 1 and l == 0) for p, l in zip(all_preds, all_labels))
-        tn = sum((p == 0 and l == 0) for p, l in zip(all_preds, all_labels))
-        fn = sum((p == 0 and l == 1) for p, l in zip(all_preds, all_labels))
+        # Optimize Decision Threshold on Validation set for Cumulative Strategy Return (Net of Transaction Cost)
+        best_epoch_val_return = -9999.0
+        best_epoch_val_f1 = 0.0
+        best_epoch_val_precision = 0.0
+        best_epoch_val_recall = 0.0
+        best_epoch_val_acc = 0.0
+        best_epoch_val_threshold = 0.5
         
-        epoch_val_precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        epoch_val_recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        epoch_val_f1 = (2 * epoch_val_precision * epoch_val_recall) / (epoch_val_precision + epoch_val_recall) if (epoch_val_precision + epoch_val_recall) > 0 else 0.0
+        cost = getattr(config, "transaction_cost", 0.05)
+        
+        thresholds_to_test = np.arange(0.1, 1.0, 0.1)
+        for th in thresholds_to_test:
+            th_preds = [1 if p >= th else 0 for p in all_probs]
+            
+            tp = sum((p == 1 and l == 1) for p, l in zip(th_preds, all_labels))
+            fp = sum((p == 1 and l == 0) for p, l in zip(th_preds, all_labels))
+            tn = sum((p == 0 and l == 0) for p, l in zip(th_preds, all_labels))
+            fn = sum((p == 0 and l == 1) for p, l in zip(th_preds, all_labels))
+            
+            th_prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            th_rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            th_f1 = (2 * th_prec * th_rec) / (th_prec + th_rec) if (th_prec + th_rec) > 0 else 0.0
+            th_acc = (tp + tn) / len(all_labels) if len(all_labels) > 0 else 0.0
+            
+            th_return = sum((change - cost) for pred, change in zip(th_preds, all_pct_changes) if pred == 1)
+            
+            if th_return > best_epoch_val_return:
+                best_epoch_val_return = th_return
+                best_epoch_val_f1 = th_f1
+                best_epoch_val_precision = th_prec
+                best_epoch_val_recall = th_rec
+                best_epoch_val_acc = th_acc
+                best_epoch_val_threshold = th
+                
+        if best_epoch_val_return <= -9999.0:
+            best_epoch_val_threshold = 0.5
+            best_epoch_val_return = 0.0
+            th_preds = [1 if p >= 0.5 else 0 for p in all_probs]
+            tp = sum((p == 1 and l == 1) for p, l in zip(th_preds, all_labels))
+            fp = sum((p == 1 and l == 0) for p, l in zip(th_preds, all_labels))
+            best_epoch_val_precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            best_epoch_val_recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            best_epoch_val_f1 = (2 * best_epoch_val_precision * best_epoch_val_recall) / (best_epoch_val_precision + best_epoch_val_recall) if (best_epoch_val_precision + best_epoch_val_recall) > 0 else 0.0
+            best_epoch_val_acc = sum((p == l) for p, l in zip(th_preds, all_labels)) / len(all_labels)
 
         print(f"Epoch {epoch}/{config.epochs} -> "
               f"Train Loss: {epoch_train_loss:.4f} | Train Acc: {epoch_train_acc*100:.2f}% | "
-              f"Val Loss: {epoch_val_loss:.4f} | Val Acc: {epoch_val_acc*100:.2f}% | "
-              f"Val Precision: {epoch_val_precision*100:.2f}% | Val Recall: {epoch_val_recall*100:.2f}% | "
-              f"Val F1: {epoch_val_f1:.4f}")
+              f"Val Loss: {epoch_val_loss:.4f} | Val Acc: {best_epoch_val_acc*100:.2f}% | "
+              f"Val Precision: {best_epoch_val_precision*100:.2f}% | Val Recall: {best_epoch_val_recall*100:.2f}% | "
+              f"Val Net Return: {best_epoch_val_return:+.2f}% | Best Threshold: {best_epoch_val_threshold:.1f}")
 
         # Save performance stats to history list
         history.append({
@@ -295,26 +382,42 @@ def train_model(config: TrainConfig):
             "train_loss": epoch_train_loss,
             "train_acc": epoch_train_acc,
             "val_loss": epoch_val_loss,
-            "val_acc": epoch_val_acc,
-            "val_precision": epoch_val_precision,
-            "val_recall": epoch_val_recall,
-            "val_f1": epoch_val_f1
+            "val_acc": best_epoch_val_acc,
+            "val_precision": best_epoch_val_precision,
+            "val_recall": best_epoch_val_recall,
+            "val_f1": best_epoch_val_f1,
+            "val_net_return": best_epoch_val_return,
+            "best_threshold": best_epoch_val_threshold
         })
 
-        # Save the best model if validation F1-Score improves
-        if epoch_val_f1 > best_val_f1 and total_val_samples > 0:
-            best_val_f1 = epoch_val_f1
+        # Save the best model if validation Strategy Return improves
+        if best_epoch_val_return > best_val_return and total_val_samples > 0:
+            best_val_return = best_epoch_val_return
             best_val_loss = epoch_val_loss
             best_epoch = epoch
+            best_threshold = best_epoch_val_threshold
             best_metrics = {
                 "val_loss": epoch_val_loss,
-                "val_acc": epoch_val_acc,
-                "val_precision": epoch_val_precision,
-                "val_recall": epoch_val_recall,
-                "val_f1": epoch_val_f1
+                "val_acc": best_epoch_val_acc,
+                "val_precision": best_epoch_val_precision,
+                "val_recall": best_epoch_val_recall,
+                "val_f1": best_epoch_val_f1,
+                "best_threshold": best_epoch_val_threshold,
+                "strategy_return": best_epoch_val_return
             }
             torch.save(model.state_dict(), config.save_model_path)
-            print(f"  [+] Saved new best model to {config.save_model_path} with Val F1: {best_val_f1:.4f}")
+            print(f"  [+] Saved new best model to {config.save_model_path} with Val Strategy Return: {best_val_return:+.2f}% (Threshold: {best_threshold:.1f})")
+
+        # Early Stopping check
+        if best_epoch == epoch:
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            
+        patience = getattr(config, "early_stopping_patience", 3)
+        if epochs_no_improve >= patience:
+            print(f"\n[-] Early stopping triggered: Validation F1 did not improve for {patience} epochs.")
+            break
 
     # Save training history to CSV
     history_df = pd.DataFrame(history)
@@ -329,8 +432,6 @@ def train_model(config: TrainConfig):
     log_path = getattr(config, "experiment_log_path", "experiment_log.csv")
     import datetime
     
-    log_exists = os.path.exists(log_path)
-    
     log_entry = {
         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "model_type": getattr(config, "model_backbone", "custom_cnn"),
@@ -338,20 +439,35 @@ def train_model(config: TrainConfig):
         "learning_rate": config.learning_rate,
         "batch_size": config.batch_size,
         "sampler_type": getattr(config, "sampler_type", "standard"),
-        "loss_weighted": "yes (magnitude-weighted)",
+        "loss_weighted": f"yes (magnitude-weighted + {getattr(config, 'loss_type', 'cross_entropy')})",
         "best_epoch": best_epoch,
         "best_val_loss": round(best_metrics["val_loss"], 4),
         "best_val_accuracy": round(best_metrics["val_acc"] * 100.0, 2),
         "best_val_precision": round(best_metrics["val_precision"] * 100.0, 2),
         "best_val_recall": round(best_metrics["val_recall"] * 100.0, 2),
-        "best_val_f1": round(best_metrics["val_f1"], 4)
+        "best_val_f1": round(best_metrics["val_f1"], 4),
+        "best_threshold": round(best_metrics.get("best_threshold", 0.5), 2),
+        "strategy_return": round(best_metrics.get("strategy_return", 0.0), 2)
     }
     
-    log_df = pd.DataFrame([log_entry])
-    if log_exists:
-        log_df.to_csv(log_path, mode='a', header=False, index=False)
+    if os.path.exists(log_path):
+        try:
+            existing_df = pd.read_csv(log_path)
+            if "best_threshold" not in existing_df.columns:
+                existing_df["best_threshold"] = 0.5
+            if "strategy_return" not in existing_df.columns:
+                existing_df["strategy_return"] = 0.0
+            
+            new_row_df = pd.DataFrame([log_entry])
+            combined_df = pd.concat([existing_df, new_row_df], ignore_index=True)
+            combined_df.to_csv(log_path, index=False)
+        except Exception as e:
+            print(f"Warning: Could not append to experiment log via DataFrame: {e}. Falling back.")
+            log_df = pd.DataFrame([log_entry])
+            log_df.to_csv(log_path, mode='a', header=False, index=False)
     else:
-        log_df.to_csv(log_path, mode='w', header=True, index=False)
+        log_df = pd.DataFrame([log_entry])
+        log_df.to_csv(log_path, index=False)
     print(f"Persistent experiment settings and best metrics appended to: {os.path.abspath(log_path)}")
 
 def plot_training_curves(history_df: pd.DataFrame, save_path: str):

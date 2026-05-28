@@ -64,6 +64,9 @@ class CustomCandlestickCNN(nn.Module):
         return x
 
 class CandlestickDataset(Dataset):
+    """
+    Custom PyTorch Dataset that loads candlestick images based on the metadata CSV.
+    """
     def __init__(self, df: pd.DataFrame, img_dir: str, transform=None):
         self.df = df.reset_index(drop=True)
         self.img_dir = img_dir
@@ -76,13 +79,19 @@ class CandlestickDataset(Dataset):
         row = self.df.iloc[idx]
         img_name = row["filename"]
         img_path = os.path.join(self.img_dir, img_name)
-        image = Image.open(img_path).convert("RGB")
+        
+        try:
+            image = Image.open(img_path).convert("RGB")
+        except Exception as e:
+            raise FileNotFoundError(f"Error loading image {img_path}: {e}")
+            
         label = int(row["target_label"])
+        pct_change = float(row["pct_change"])
 
         if self.transform:
             image = self.transform(image)
 
-        return image, label
+        return image, label, pct_change
 
 def evaluate():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -105,14 +114,30 @@ def evaluate():
     ])
     
     val_dataset = CandlestickDataset(val_df, TrainConfig.img_dir, transform=data_transforms)
-    val_loader = DataLoader(val_dataset, batch_size=TrainConfig.batch_size, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=TrainConfig.batch_size, shuffle=False, num_workers=4, pin_memory=True)
     
-    # Load model
-    model = CustomCandlestickCNN(num_classes=TrainConfig.num_classes, dropout_prob=0.3)
-    
+    # Load and auto-detect model architecture from weights
     if os.path.exists(TrainConfig.save_model_path):
-        model.load_state_dict(torch.load(TrainConfig.save_model_path, map_location=device))
+        state_dict = torch.load(TrainConfig.save_model_path, map_location=device)
         print(f"Loaded model weights from {TrainConfig.save_model_path}")
+        
+        # Check if weights contain ResNet keys
+        is_resnet = any(k.startswith("fc.") and not k.startswith("fc1.") and not k.startswith("fc2.") for k in state_dict.keys()) or "layer1.0.conv1.weight" in state_dict.keys()
+        
+        if is_resnet:
+            print("Auto-detected Architecture: ResNet-18")
+            weights = ResNet18_Weights.DEFAULT
+            model = resnet18(weights=weights)
+            num_ftrs = model.fc.in_features
+            model.fc = nn.Sequential(
+                nn.Dropout(p=0.4),
+                nn.Linear(num_ftrs, TrainConfig.num_classes)
+            )
+        else:
+            print("Auto-detected Architecture: CustomCandlestickCNN")
+            model = CustomCandlestickCNN(num_classes=TrainConfig.num_classes, dropout_prob=0.3)
+            
+        model.load_state_dict(state_dict)
     else:
         print("Error: Saved model weights not found.")
         return
@@ -120,39 +145,79 @@ def evaluate():
     model = model.to(device)
     model.eval()
     
-    all_preds = []
+    all_probs = []
     all_labels = []
+    all_pct_changes = []
     
     with torch.no_grad():
-        for inputs, labels in val_loader:
+        for inputs, labels, pct_changes in val_loader:
             inputs = inputs.to(device)
             outputs = model(inputs)
-            _, preds = torch.max(outputs, 1)
+            probs = torch.softmax(outputs, dim=1)
             
-            all_preds.extend(preds.cpu().tolist())
+            all_probs.extend(probs[:, 1].cpu().tolist())
             all_labels.extend(labels.tolist())
+            all_pct_changes.extend(pct_changes.tolist())
             
-    # Confusion Matrix
-    tp = sum((p == 1 and l == 1) for p, l in zip(all_preds, all_labels))
-    fp = sum((p == 1 and l == 0) for p, l in zip(all_preds, all_labels))
-    tn = sum((p == 0 and l == 0) for p, l in zip(all_preds, all_labels))
-    fn = sum((p == 0 and l == 1) for p, l in zip(all_preds, all_labels))
+    print("\nDecision Threshold Tuning Results on Validation Split:")
+    print("-" * 90)
+    print(f"{'Threshold':<12} | {'Accuracy':<10} | {'Precision':<10} | {'Recall':<10} | {'F1-Score':<10} | {'Net Return (%)':<15}")
+    print("-" * 90)
     
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-    accuracy = (tp + tn) / len(all_labels)
+    best_return = -9999.0
+    best_th = 0.5
+    best_metrics = {}
+    cost = 0.05  # Transaction cost 0.05%
     
-    print("\nEvaluation Results on Validation Split:")
-    print(f"Accuracy:  {accuracy*100:.2f}%")
-    print(f"Precision: {precision*100:.2f}%")
-    print(f"Recall:    {recall*100:.2f}%")
-    print(f"F1-Score:  {f1:.4f}")
+    for th in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+        th_preds = [1 if p >= th else 0 for p in all_probs]
+        
+        tp = sum((p == 1 and l == 1) for p, l in zip(th_preds, all_labels))
+        fp = sum((p == 1 and l == 0) for p, l in zip(th_preds, all_labels))
+        tn = sum((p == 0 and l == 0) for p, l in zip(th_preds, all_labels))
+        fn = sum((p == 0 and l == 1) for p, l in zip(th_preds, all_labels))
+        
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+        accuracy = (tp + tn) / len(all_labels)
+        
+        # Calculate Strategy Net Return
+        th_return = sum((change - cost) for pred, change in zip(th_preds, all_pct_changes) if pred == 1)
+        
+        print(f"{th:<12.1f} | {accuracy*100:<9.2f}% | {precision*100:<9.2f}% | {recall*100:<9.2f}% | {f1:<10.4f} | {th_return:<+14.2f}%")
+        
+        if th_return > best_return:
+            best_return = th_return
+            best_th = th
+            best_metrics = {
+                "accuracy": accuracy,
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+                "return": th_return,
+                "tp": tp,
+                "fp": fp,
+                "tn": tn,
+                "fn": fn
+            }
+            
+    print("-" * 90)
     
-    print("\nConfusion Matrix:")
-    print(f"               Predicted Class 0 | Predicted Class 1")
-    print(f"Actual Class 0        {tn:<10} |        {fp:<10}")
-    print(f"Actual Class 1        {fn:<10} |        {tp:<10}")
+    if best_return > -9999.0:
+        print(f"\nOptimal Decision Threshold (Max Profit): {best_th:.1f}")
+        print(f"Accuracy:  {best_metrics['accuracy']*100:.2f}%")
+        print(f"Precision: {best_metrics['precision']*100:.2f}% (Baseline: {sum(all_labels)/len(all_labels)*100:.2f}%)")
+        print(f"Recall:    {best_metrics['recall']*100:.2f}%")
+        print(f"F1-Score:  {best_metrics['f1']:.4f}")
+        print(f"Strategy Net Return: {best_metrics['return']:+.2f}%")
+        
+        print("\nConfusion Matrix for Optimal Threshold:")
+        print(f"               Predicted Class 0 | Predicted Class 1")
+        print(f"Actual Class 0        {best_metrics['tn']:<10} |        {best_metrics['fp']:<10}")
+        print(f"Actual Class 1        {best_metrics['fn']:<10} |        {best_metrics['tp']:<10}")
+    else:
+        print("\nNo threshold produced valid trading signals.")
 
 if __name__ == "__main__":
     evaluate()

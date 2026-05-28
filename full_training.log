@@ -1,0 +1,20 @@
+Using device: cuda
+Loaded metadata.csv containing 25588 records.
+Chronological split applied:
+  - Training samples: 20470 (from 2016-07-15 00:00:00 to 2024-05-23 00:00:00)
+  - Validation samples: 5118 (from 2024-05-23 00:00:00 to 2026-05-18 00:00:00)
+Using WeightedRandomSampler to balance batches (Class counts: [18950  1520])
+Initializing Pretrained ResNet18 backbone...
+Using Focal Loss (alpha=0.75, gamma=2.0)
+Starting training loop (10 epochs)...
+Epoch 1/10 -> Train Loss: 0.5294 | Train Acc: 64.60% | Val Loss: 0.5384 | Val Acc: 70.63% | Val Precision: 11.95% | Val Recall: 50.42% | Val F1: 0.1932 | Best Threshold: 0.7
+  [+] Saved new best model to best_model.pth with Val F1: 0.1932 (Threshold: 0.7)
+Epoch 2/10 -> Train Loss: 0.2127 | Train Acc: 84.58% | Val Loss: 0.5353 | Val Acc: 70.44% | Val Precision: 10.73% | Val Recall: 44.26% | Val F1: 0.1728 | Best Threshold: 0.4
+Epoch 3/10 -> Train Loss: 0.1308 | Train Acc: 90.95% | Val Loss: 0.5526 | Val Acc: 78.39% | Val Precision: 12.96% | Val Recall: 36.69% | Val F1: 0.1915 | Best Threshold: 0.6
+Epoch 4/10 -> Train Loss: 0.0827 | Train Acc: 94.10% | Val Loss: 0.6395 | Val Acc: 82.83% | Val Precision: 13.45% | Val Recall: 26.89% | Val F1: 0.1793 | Best Threshold: 0.6
+
+[-] Early stopping triggered: Validation F1 did not improve for 3 epochs.
+
+Saved training metrics history to history.csv
+Saved loss and accuracy curves to training_curves.png
+Persistent experiment settings and best metrics appended to: E:\Projekty\CV-prediction\CV-prediction\experiment_log.csv

@@ -1,0 +1,32 @@
+Validation set size: 5118
+  - Actual Class 0 (No-Buy): 4761
+  - Actual Class 1 (Buy):    357
+Loaded model weights from best_model.pth
+Auto-detected Architecture: ResNet-18
+
+Decision Threshold Tuning Results on Validation Split:
+------------------------------------------------------------------------------------------
+Threshold    | Accuracy   | Precision  | Recall     | F1-Score   | Net Return (%) 
+------------------------------------------------------------------------------------------
+0.1          | 7.25     % | 6.99     % | 100.00   % | 0.1307     | -125.20       %
+0.2          | 10.49    % | 7.23     % | 100.00   % | 0.1348     | -71.68        %
+0.3          | 17.49    % | 7.70     % | 98.60    % | 0.1429     | +63.90        %
+0.4          | 28.10    % | 8.41     % | 94.12    % | 0.1544     | +180.25       %
+0.5          | 40.35    % | 8.85     % | 81.23    % | 0.1596     | +256.88       %
+0.6          | 56.35    % | 10.75    % | 71.99    % | 0.1870     | +349.67       %
+0.7          | 70.63    % | 11.95    % | 50.42    % | 0.1932     | +233.19       %
+0.8          | 82.75    % | 12.32    % | 24.09    % | 0.1630     | +189.39       %
+0.9          | 91.29    % | 20.13    % | 8.40     % | 0.1186     | +57.37        %
+------------------------------------------------------------------------------------------
+
+Optimal Decision Threshold (Max Profit): 0.6
+Accuracy:  56.35%
+Precision: 10.75% (Baseline: 6.98%)
+Recall:    71.99%
+F1-Score:  0.1870
+Strategy Net Return: +349.67%
+
+Confusion Matrix for Optimal Threshold:
+               Predicted Class 0 | Predicted Class 1
+Actual Class 0        2627       |        2134      
+Actual Class 1        100        |        257       

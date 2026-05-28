@@ -1,0 +1,15 @@
+Using device: cpu
+Loaded metadata.csv containing 25588 records.
+Chronological split applied:
+  - Training samples: 200 (from 2016-07-15 00:00:00 to 2016-08-11 00:00:00)
+  - Validation samples: 50 (from 2024-05-23 00:00:00 to 2024-05-30 00:00:00)
+Using WeightedRandomSampler to balance batches (Class counts: [194   6])
+Initializing Pretrained ResNet18 backbone...
+Using Focal Loss (alpha=0.25, gamma=2.0)
+Starting training loop (1 epochs)...
+Epoch 1/1 -> Train Loss: 0.2727 | Train Acc: 87.50% | Val Loss: 0.6071 | Val Acc: 50.00% | Val Precision: 0.00% | Val Recall: 0.00% | Val F1: 0.0000 | Best Threshold: 0.5
+  [+] Saved new best model to best_model.pth with Val F1: 0.0000 (Threshold: 0.5)
+
+Saved training metrics history to history.csv
+Saved loss and accuracy curves to training_curves.png
+Persistent experiment settings and best metrics appended to: E:\Projekty\CV-prediction\CV-prediction\experiment_log.csv
