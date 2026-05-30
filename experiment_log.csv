@@ -1,0 +1,8 @@
+timestamp,model_type,epochs,learning_rate,batch_size,sampler_type,loss_weighted,best_epoch,best_val_loss,best_val_accuracy,best_val_precision,best_val_recall,best_val_f1,best_threshold
+2026-05-24 13:37:39,resnet18,2,0.0001,32,weighted,yes (magnitude-weighted),1,3.5691,72.81,19.14,29.52,0.2322,0.5
+2026-05-24 13:52:23,resnet18,10,0.0001,32,weighted,yes (magnitude-weighted),2,4.3932,72.28,20.45,34.29,0.2562,0.5
+2026-05-24 15:55:57,custom_cnn,2,0.0001,32,weighted,yes (magnitude-weighted),2,5.1408,15.9,7.37,95.52,0.1368,0.5
+2026-05-24 19:13:13,custom_cnn,10,0.0001,32,weighted,yes (magnitude-weighted),7,2.6427,85.33,14.82,23.25,0.181,0.5
+2026-05-28 22:24:52,resnet18,1,0.0001,32,weighted,yes (magnitude-weighted + focal),1,0.6071,50.0,0.0,0.0,0.0,0.5
+2026-05-28 23:07:55,resnet18,10,0.0001,32,weighted,yes (magnitude-weighted + focal),1,0.435,86.85,15.5,19.89,0.1742,0.6
+2026-05-28 23:34:02,resnet18,10,0.0001,32,weighted,yes (magnitude-weighted + focal),1,0.5384,70.63,11.95,50.42,0.1932,0.7

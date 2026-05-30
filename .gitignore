@@ -8,9 +8,6 @@ dataset_market_cv/
 *.pth
 
 # Ignore local training history and log databases
-history.csv
-experiment_log.csv
-training_curves.png
 
 # Ignore Python bytecode and runtime caches
 __pycache__/
