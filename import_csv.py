@@ -197,50 +197,48 @@ def generate_dataset_from_csv(config: CSVConfig):
 
                     start_date = window_data.index[0].strftime("%Y-%m-%d %H:%M:%S")
                     end_date = window_data.index[-1].strftime("%Y-%m-%d %H:%M:%S")
+                    # --- NEW PROFESSIONAL NORMALIZATION FOR TENSORS ---
+                    close_mean = window_data['Close'].mean()
+                    close_std = window_data['Close'].std() + 1e-8
                     
-                    # --- NORMALIZATION FOR TENSORS & IMAGES ---
-                    tensor_features = ['Open', 'High', 'Low', 'Close', 'Volume', 'SMA_10', 'SMA_20', 'RSI', 'MACD', 'MACD_Signal']
-                    tensor_data = window_data[tensor_features].copy()
-                    
-                    if config.normalize_data:
-                        # Price norm
-                        p_min = window_data['Low'].min()
-                        p_max = window_data['High'].max()
-                        if p_max > p_min:
-                            for col in ['Open', 'High', 'Low', 'Close', 'SMA_10', 'SMA_20']:
-                                window_data[col] = (window_data[col] - p_min) / (p_max - p_min)
-                                tensor_data[col] = (tensor_data[col] - p_min) / (p_max - p_min)
+                    tensor_data = pd.DataFrame()
+                    for col in ['Open', 'High', 'Low', 'Close', 'SMA_10', 'SMA_20']:
+                        tensor_data[col] = (window_data[col] - close_mean) / close_std
                         
-                        # Vol norm
-                        v_min, v_max = window_data['Volume'].min(), window_data['Volume'].max()
-                        if v_max > v_min:
-                            window_data['Volume'] = (window_data['Volume'] - v_min) / (v_max - v_min)
-                            tensor_data['Volume'] = (tensor_data['Volume'] - v_min) / (v_max - v_min)
-                            
-                        # RSI norm (RSI is 0-100, we divide by 100)
-                        window_data['RSI'] = window_data['RSI'] / 100.0
-                        tensor_data['RSI'] = tensor_data['RSI'] / 100.0
-                        
-                        # MACD norm
-                        m_min = window_data[['MACD', 'MACD_Signal', 'MACD_Hist']].min().min()
-                        m_max = window_data[['MACD', 'MACD_Signal', 'MACD_Hist']].max().max()
-                        if m_max > m_min:
-                            for col in ['MACD', 'MACD_Signal', 'MACD_Hist']:
-                                window_data[col] = (window_data[col] - m_min) / (m_max - m_min)
-                                if col in tensor_data:
-                                    tensor_data[col] = (tensor_data[col] - m_min) / (m_max - m_min)
+                    tensor_data['Volume'] = (window_data['Volume'] - window_data['Volume'].mean()) / (window_data['Volume'].std() + 1e-8)
+                    tensor_data['RSI'] = window_data['RSI'] / 100.0
+                    tensor_data['MACD'] = window_data['MACD'] / close_std
+                    tensor_data['MACD_Signal'] = window_data['MACD_Signal'] / close_std
+                    tensor_data['ATR_pct'] = window_data['ATR'] / close_mean
+                    tensor_data = tensor_data.fillna(0)
 
                     # --- SAVE TENSOR (.npy) ---
                     base_filename = f"{symbol}_{config.timeframe}_w{config.window_size}_{i:05d}"
                     img_filename = f"{base_filename}.png"
                     tensor_filename = f"{base_filename}.npy"
                     
-                    if img_filename in processed_files:
-                        continue
-                        
                     tensor_filepath = os.path.join(tensors_dir, tensor_filename)
-                    # Convert to numpy and save shape (20, 10)
+                    # Convert to numpy and save shape (20, 11)
                     np.save(tensor_filepath, tensor_data.values.astype(np.float32))
+                    
+                    if img_filename in processed_files:
+                        continue # Skip image generation since it exists, but tensor is now saved!
+
+                    # --- VISUAL NORMALIZATION FOR IMAGES ONLY ---
+                    p_min = window_data['Low'].min()
+                    p_max = window_data['High'].max()
+                    if p_max > p_min:
+                        for col in ['Open', 'High', 'Low', 'Close', 'SMA_10', 'SMA_20']:
+                            window_data[col] = (window_data[col] - p_min) / (p_max - p_min)
+                    v_min, v_max = window_data['Volume'].min(), window_data['Volume'].max()
+                    if v_max > v_min:
+                        window_data['Volume'] = (window_data['Volume'] - v_min) / (v_max - v_min)
+                    window_data['RSI'] = window_data['RSI'] / 100.0
+                    m_min = window_data[['MACD', 'MACD_Signal', 'MACD_Hist']].min().min()
+                    m_max = window_data[['MACD', 'MACD_Signal', 'MACD_Hist']].max().max()
+                    if m_max > m_min:
+                        for col in ['MACD', 'MACD_Signal', 'MACD_Hist']:
+                            window_data[col] = (window_data[col] - m_min) / (m_max - m_min)
 
                     # --- TECHNICAL INDICATOR LINES FOR IMAGE ---
                     apds = []

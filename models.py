@@ -6,37 +6,28 @@ from torchvision.models import resnet18, ResNet18_Weights
 # 1. VISION-ONLY MODEL (BASELINE CNN)
 # ==========================================
 class CustomCandlestickCNN(nn.Module):
-    """
-    Custom regularized 4-layer CNN designed specifically for geometric financial charts.
-    Uses BatchNorm and Dropout to force generalization and prevent pixel memorization.
-    """
     def __init__(self, num_classes=2, dropout_prob=0.3, extract_features=False):
         super(CustomCandlestickCNN, self).__init__()
         self.extract_features = extract_features
         
-        # Conv block 1: Input (3, 224, 224) -> Output (16, 112, 112)
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(16)
         self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        # Conv block 2: Input (16, 112, 112) -> Output (32, 56, 56)
         self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(32)
         self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        # Conv block 3: Input (32, 56, 56) -> Output (64, 28, 28)
         self.conv3 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, padding=1)
         self.bn3 = nn.BatchNorm2d(64)
         self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        # Conv block 4: Input (64, 28, 28) -> Output (128, 14, 14)
         self.conv4 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding=1)
         self.bn4 = nn.BatchNorm2d(128)
         self.pool4 = nn.MaxPool2d(kernel_size=2, stride=2)
         
         self.relu = nn.ReLU()
         
-        # 128 channels * 14 * 14 feature map dimension = 25088 input features
         self.feature_dim = 128 * 14 * 14
         
         if not self.extract_features:
@@ -50,7 +41,7 @@ class CustomCandlestickCNN(nn.Module):
         x = self.pool3(self.relu(self.bn3(self.conv3(x))))
         x = self.pool4(self.relu(self.bn4(self.conv4(x))))
         
-        x = x.view(x.size(0), -1)  # Flatten
+        x = x.view(x.size(0), -1)
         
         if self.extract_features:
             return x
@@ -61,64 +52,86 @@ class CustomCandlestickCNN(nn.Module):
         return x
 
 # ==========================================
-# 2. TABULAR-ONLY MODEL (BASELINE LSTM)
+# 2. ADVANCED TABULAR-ONLY MODEL (BiLSTM + Attention)
 # ==========================================
 class LSTMBaseline(nn.Module):
     """
-    LSTM model processing the raw 20-day numerical time series.
-    Input shape should be (batch_size, sequence_length, input_dim).
+    Advanced Bidirectional LSTM with Attention Mechanism and Layer Normalization.
     """
-    def __init__(self, input_dim=10, hidden_dim=64, num_layers=2, num_classes=2, dropout_prob=0.3, extract_features=False):
+    def __init__(self, input_dim=11, hidden_dim=128, num_layers=3, num_classes=2, dropout_prob=0.4, extract_features=False):
         super(LSTMBaseline, self).__init__()
         self.extract_features = extract_features
         self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
         
-        # LSTM layer expects input of shape (batch, seq, feature) when batch_first=True
+        # Bidirectional LSTM to understand context from both past and future relative points
         self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim, 
-                            num_layers=num_layers, batch_first=True, dropout=dropout_prob if num_layers > 1 else 0)
+                            num_layers=num_layers, batch_first=True, 
+                            dropout=dropout_prob, bidirectional=True)
+        
+        # Attention Mechanism
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1)
+        )
+        
+        self.layer_norm = nn.LayerNorm(hidden_dim * 2)
+        
+        # We need this to expose the output dim for the Hybrid model
+        self.output_feature_dim = hidden_dim * 2
         
         if not self.extract_features:
             self.dropout = nn.Dropout(p=dropout_prob)
-            self.fc = nn.Linear(hidden_dim, num_classes)
+            self.fc1 = nn.Linear(self.output_feature_dim, 64)
+            self.relu = nn.ReLU()
+            self.fc2 = nn.Linear(64, num_classes)
             
     def forward(self, x):
-        # x shape: (batch_size, seq_len=20, input_dim=10)
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).to(x.device)
+        # lstm_out shape: (batch, seq_len, hidden_dim * 2)
+        lstm_out, _ = self.lstm(x)
         
-        out, _ = self.lstm(x, (h0, c0))
+        # Attention weights
+        attn_weights = self.attention(lstm_out) # (batch, seq_len, 1)
+        attn_weights = torch.softmax(attn_weights, dim=1)
         
-        # Extract the output of the last time step
-        last_step_out = out[:, -1, :]
+        # Context vector (weighted sum of sequence elements)
+        context_vector = torch.sum(attn_weights * lstm_out, dim=1) # (batch, hidden_dim * 2)
+        
+        context_vector = self.layer_norm(context_vector)
         
         if self.extract_features:
-            return last_step_out
+            return context_vector
             
-        last_step_out = self.dropout(last_step_out)
-        out = self.fc(last_step_out)
+        out = self.dropout(context_vector)
+        out = self.relu(self.fc1(out))
+        out = self.fc2(out)
         return out
 
 # ==========================================
-# 3. MULTI-MODAL MODEL (HYBRID CNN + LSTM)
+# 3. ADVANCED MULTI-MODAL MODEL (HYBRID CNN + ADVANCED LSTM)
 # ==========================================
 class Hybrid_CNN_LSTM(nn.Module):
     """
-    Combines Vision features (CNN) and Time-Series features (LSTM) using Late Fusion.
+    Combines Vision features (CNN) and Advanced Time-Series features (BiLSTM+Attn).
     """
-    def __init__(self, lstm_input_dim=10, num_classes=2, dropout_prob=0.4):
+    def __init__(self, lstm_input_dim=11, num_classes=2, dropout_prob=0.4):
         super(Hybrid_CNN_LSTM, self).__init__()
         
-        # Instantiate sub-models as feature extractors
         self.cnn = CustomCandlestickCNN(extract_features=True)
-        self.lstm = LSTMBaseline(input_dim=lstm_input_dim, hidden_dim=64, num_layers=2, extract_features=True)
+        self.lstm = LSTMBaseline(input_dim=lstm_input_dim, extract_features=True)
         
         cnn_feature_dim = self.cnn.feature_dim # 25088
-        lstm_feature_dim = self.lstm.hidden_dim # 64
+        lstm_feature_dim = self.lstm.output_feature_dim # 256
         
-        combined_dim = cnn_feature_dim + lstm_feature_dim
+        # FIX: BOTTLENECK LAYER FOR CNN TO PREVENT GRADIENT DROWNING
+        self.cnn_bottleneck = nn.Sequential(
+            nn.Linear(cnn_feature_dim, 256),
+            nn.ReLU(),
+            nn.BatchNorm1d(256)
+        )
         
-        # Fusion Head
+        combined_dim = 256 + lstm_feature_dim # 256 + 256 = 512
+        
         self.fc1 = nn.Linear(combined_dim, 256)
         self.bn1 = nn.BatchNorm1d(256)
         self.dropout = nn.Dropout(p=dropout_prob)
@@ -126,16 +139,14 @@ class Hybrid_CNN_LSTM(nn.Module):
         self.relu = nn.ReLU()
         
     def forward(self, image_x, tabular_x):
-        # 1. Vision stream
         cnn_features = self.cnn(image_x)
+        cnn_compressed = self.cnn_bottleneck(cnn_features)
         
-        # 2. Time-series stream
         lstm_features = self.lstm(tabular_x)
         
-        # 3. Concatenate (Late Fusion)
-        combined = torch.cat((cnn_features, lstm_features), dim=1)
+        # Equal concatenation (256 vs 256)
+        combined = torch.cat((cnn_compressed, lstm_features), dim=1)
         
-        # 4. Final Classification Head
         x = self.fc1(combined)
         x = self.bn1(x)
         x = self.relu(x)

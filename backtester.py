@@ -14,20 +14,26 @@ class BacktestConfig:
     tensor_dir = "dataset_market_cv/tensors"
     
     # Model to evaluate
-    model_type = "hybrid"  # "cnn", "lstm", or "hybrid"
+    model_type = "hybrid"  # Change to "cnn" or "lstm" if needed
     model_path = f"best_model_hybrid.pth"
     
     train_split_pct = 0.8
     batch_size = 32
     
-    # Financial Simulation
+    # PROFESSIONAL FINANCIAL SIMULATION
     starting_capital = 10000.0
-    risk_per_trade_pct = 0.02  # Risk 2% of capital per trade
-    transaction_cost_pct = 0.0005 # 0.05%
+    risk_per_trade_pct = 0.02  # Risk exactly 2% of current portfolio equity per trade
+    reward_to_risk_ratio = 2.0 # TP is 2x ATR, SL is 1x ATR
+    transaction_cost_pct = 0.0005 # Used for timeouts
     
+    # CONCURRENCY/MARGIN MANAGEMENT
+    # Prevent taking a new trade on the same symbol if we already have an active one.
+    # Since we don't have exact exit dates, we enforce a strict 20-day cooldown per symbol.
+    symbol_cooldown_days = 20
+
 def run_backtest(config: BacktestConfig):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Starting Backtest on Validation Set using Architecture: {config.model_type.upper()}")
+    print(f"Starting REALISTIC Backtest on Validation Set using Architecture: {config.model_type.upper()}")
     
     df = pd.read_csv(config.csv_file)
     df["end_date"] = pd.to_datetime(df["end_date"])
@@ -87,21 +93,17 @@ def run_backtest(config: BacktestConfig):
             
     val_df["pred_prob"] = all_probs
     
-    # --- SIMULATE TRADING ---
-    # We will simulate a simple strategy: take trades where prob > threshold.
-    # To keep things simple, we assume trades don't overlap in a way that blocks capital completely, 
-    # but we compound the capital.
-    
+    # --- SIMULATE REALISTIC TRADING ---
     thresholds = [0.5, 0.6, 0.7, 0.8, 0.9]
     best_th = 0.5
     best_final_capital = 0.0
     best_equity_curve = []
     
-    print("\n" + "="*80)
-    print("BACKTEST RESULTS (Compounding Capital)")
-    print("="*80)
+    print("\n" + "="*90)
+    print("PROFESSIONAL BACKTEST RESULTS (2% Risk, Concurrency Protection)")
+    print("="*90)
     print(f"{'Threshold':<10} | {'Trades':<8} | {'Win Rate':<10} | {'Max Drawdown':<15} | {'Final Capital':<15}")
-    print("-"*80)
+    print("-" * 90)
     
     for th in thresholds:
         capital = config.starting_capital
@@ -112,27 +114,53 @@ def run_backtest(config: BacktestConfig):
         trades_taken = 0
         winning_trades = 0
         
+        # Track when a symbol is available to trade again
+        # Dictionary mapping symbol -> datetime
+        symbol_cooldown = {}
+        
         for idx, row in val_df.iterrows():
             if row["pred_prob"] >= th:
+                symbol = row["symbol"]
+                current_date = row["end_date"]
+                
+                # Check concurrency cooldown
+                if symbol in symbol_cooldown:
+                    if current_date < symbol_cooldown[symbol]:
+                        continue # Symbol is locked in an active trade, skip this signal
+                
+                # We take the trade
                 trades_taken += 1
                 
-                # Raw percentage change from import_csv.py (already accounts for TP/SL exit)
-                raw_pct_change = row["pct_change"]
+                # Update cooldown (block this symbol for N days)
+                symbol_cooldown[symbol] = current_date + pd.Timedelta(days=config.symbol_cooldown_days)
                 
-                # Deduct transaction costs (open and close)
-                net_pct_change = raw_pct_change - (config.transaction_cost_pct * 100 * 2)
+                # Financial simulation based on fixed fractional risk
+                # If exit_type == 'TP', we win 2x Risk (because TP is 2x ATR, SL is 1x ATR)
+                # If exit_type == 'SL', we lose 1x Risk.
+                # If timeout, we scale the risk based on pct_change direction (simplified)
                 
-                # Position sizing based on capital
-                # We assume we invest full capital per trade for compounding in this simple backtest
-                # In a real scenario, you'd use Risk_Per_Trade / SL_Distance.
-                trade_profit = capital * (net_pct_change / 100.0)
+                exit_type = row["exit_type"]
+                trade_profit = 0.0
+                
+                if exit_type == "TP":
+                    trade_profit = capital * config.risk_per_trade_pct * config.reward_to_risk_ratio
+                    trade_profit -= capital * config.transaction_cost_pct # deduct commissions
+                    winning_trades += 1
+                elif exit_type == "SL":
+                    trade_profit = - (capital * config.risk_per_trade_pct)
+                    trade_profit -= capital * config.transaction_cost_pct
+                else: # Timeout
+                    # Approximate timeout result (slightly positive or negative)
+                    if row["pct_change"] > 0:
+                        trade_profit = capital * (config.risk_per_trade_pct * 0.5) # Assume partial win
+                        winning_trades += 1
+                    else:
+                        trade_profit = - (capital * config.risk_per_trade_pct * 0.5) # Assume partial loss
+                    trade_profit -= capital * config.transaction_cost_pct
+                
                 capital += trade_profit
-                
                 equity_curve.append(capital)
                 
-                if net_pct_change > 0:
-                    winning_trades += 1
-                    
                 if capital > peak_capital:
                     peak_capital = capital
                 
@@ -149,19 +177,19 @@ def run_backtest(config: BacktestConfig):
             best_th = th
             best_equity_curve = equity_curve
 
-    print("="*80)
+    print("="*90)
     
     if best_final_capital > config.starting_capital:
         print(f"\nHighly Profitable Strategy Found at Threshold {best_th}")
         plt.figure(figsize=(10, 5))
         plt.plot(best_equity_curve, color='green', linewidth=2)
-        plt.title(f"Equity Curve (Initial: ${config.starting_capital}, Final: ${best_final_capital:.2f})")
+        plt.title(f"REALISTIC Equity Curve (Init: ${config.starting_capital}, Final: ${best_final_capital:.2f})")
         plt.xlabel("Number of Trades")
         plt.ylabel("Portfolio Balance ($)")
         plt.grid(True, alpha=0.5)
-        curve_path = f"equity_curve_{config.model_type}.png"
+        curve_path = f"equity_curve_{config.model_type}_realistic.png"
         plt.savefig(curve_path, dpi=150)
-        print(f"Saved equity curve plot to {curve_path}")
+        print(f"Saved realistic equity curve plot to {curve_path}")
     else:
         print(f"\nNo profitable thresholds found. Maximum capital reached: ${best_final_capital:.2f}")
 
