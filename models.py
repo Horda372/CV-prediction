@@ -2,9 +2,6 @@ import torch
 import torch.nn as nn
 from torchvision.models import resnet18, ResNet18_Weights
 
-# ==========================================
-# 1. VISION-ONLY MODEL (BASELINE CNN)
-# ==========================================
 class CustomCandlestickCNN(nn.Module):
     def __init__(self, num_classes=2, dropout_prob=0.3, extract_features=False):
         super(CustomCandlestickCNN, self).__init__()
@@ -51,24 +48,19 @@ class CustomCandlestickCNN(nn.Module):
         x = self.fc2(x)
         return x
 
-# ==========================================
-# 2. ADVANCED TABULAR-ONLY MODEL (BiLSTM + Attention)
-# ==========================================
 class LSTMBaseline(nn.Module):
     """
-    Advanced Bidirectional LSTM with Attention Mechanism and Layer Normalization.
+    Bidirectional LSTM with Attention Mechanism and Layer Normalization.
     """
     def __init__(self, input_dim=11, hidden_dim=128, num_layers=3, num_classes=2, dropout_prob=0.4, extract_features=False):
         super(LSTMBaseline, self).__init__()
         self.extract_features = extract_features
         self.hidden_dim = hidden_dim
         
-        # Bidirectional LSTM to understand context from both past and future relative points
         self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim, 
                             num_layers=num_layers, batch_first=True, 
                             dropout=dropout_prob, bidirectional=True)
         
-        # Attention Mechanism
         self.attention = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.Tanh(),
@@ -77,7 +69,6 @@ class LSTMBaseline(nn.Module):
         
         self.layer_norm = nn.LayerNorm(hidden_dim * 2)
         
-        # We need this to expose the output dim for the Hybrid model
         self.output_feature_dim = hidden_dim * 2
         
         if not self.extract_features:
@@ -87,16 +78,12 @@ class LSTMBaseline(nn.Module):
             self.fc2 = nn.Linear(64, num_classes)
             
     def forward(self, x):
-        # lstm_out shape: (batch, seq_len, hidden_dim * 2)
         lstm_out, _ = self.lstm(x)
         
-        # Attention weights
-        attn_weights = self.attention(lstm_out) # (batch, seq_len, 1)
+        attn_weights = self.attention(lstm_out)
         attn_weights = torch.softmax(attn_weights, dim=1)
         
-        # Context vector (weighted sum of sequence elements)
-        context_vector = torch.sum(attn_weights * lstm_out, dim=1) # (batch, hidden_dim * 2)
-        
+        context_vector = torch.sum(attn_weights * lstm_out, dim=1)
         context_vector = self.layer_norm(context_vector)
         
         if self.extract_features:
@@ -107,12 +94,9 @@ class LSTMBaseline(nn.Module):
         out = self.fc2(out)
         return out
 
-# ==========================================
-# 3. ADVANCED MULTI-MODAL MODEL (HYBRID CNN + ADVANCED LSTM)
-# ==========================================
 class Hybrid_CNN_LSTM(nn.Module):
     """
-    Combines Vision features (CNN) and Advanced Time-Series features (BiLSTM+Attn).
+    Combines Vision features (CNN) and Time-Series features (BiLSTM+Attn).
     """
     def __init__(self, lstm_input_dim=11, num_classes=2, dropout_prob=0.4):
         super(Hybrid_CNN_LSTM, self).__init__()
@@ -120,17 +104,17 @@ class Hybrid_CNN_LSTM(nn.Module):
         self.cnn = CustomCandlestickCNN(extract_features=True)
         self.lstm = LSTMBaseline(input_dim=lstm_input_dim, extract_features=True)
         
-        cnn_feature_dim = self.cnn.feature_dim # 25088
-        lstm_feature_dim = self.lstm.output_feature_dim # 256
+        cnn_feature_dim = self.cnn.feature_dim
+        lstm_feature_dim = self.lstm.output_feature_dim
         
-        # FIX: BOTTLENECK LAYER FOR CNN TO PREVENT GRADIENT DROWNING
+        # Bottleneck layer to reduce CNN feature dimension and prevent it from dominating the LSTM features
         self.cnn_bottleneck = nn.Sequential(
             nn.Linear(cnn_feature_dim, 256),
             nn.ReLU(),
             nn.BatchNorm1d(256)
         )
         
-        combined_dim = 256 + lstm_feature_dim # 256 + 256 = 512
+        combined_dim = 256 + lstm_feature_dim
         
         self.fc1 = nn.Linear(combined_dim, 256)
         self.bn1 = nn.BatchNorm1d(256)
@@ -144,7 +128,6 @@ class Hybrid_CNN_LSTM(nn.Module):
         
         lstm_features = self.lstm(tabular_x)
         
-        # Equal concatenation (256 vs 256)
         combined = torch.cat((cnn_compressed, lstm_features), dim=1)
         
         x = self.fc1(combined)

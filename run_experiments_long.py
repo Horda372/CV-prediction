@@ -1,10 +1,11 @@
 import os
-from train_hybrid import TrainConfig, train_model
-from backtester import BacktestConfig, run_backtest
+from train_hybrid import train_model
+from config import TrainConfig, BacktestConfig
+from backtester import run_backtest
 
 def main():
     print("\n" + "="*50)
-    print("EXPERIMENT 4: LONG TRAINING TABULAR ONLY (BiLSTM + Attention)")
+    print("EXPERIMENT: LONG TRAINING TABULAR ONLY (BiLSTM + Attention)")
     print("="*50)
 
     t_config_lstm = TrainConfig()
@@ -13,7 +14,6 @@ def main():
     t_config_lstm.save_model_path = "best_model_lstm.pth"
     t_config_lstm.save_plot_path = "training_curves_lstm_long.png"
     
-    # Brute-Force settings
     t_config_lstm.epochs = 150
     t_config_lstm.early_stopping_patience = 20
     t_config_lstm.learning_rate = 0.0001
@@ -26,7 +26,7 @@ def main():
     run_backtest(b_config_lstm)
     
     print("\n" + "="*50)
-    print("EXPERIMENT 5: LONG TRAINING HYBRID (CNN + BiLSTM + Attention)")
+    print("EXPERIMENT: LONG TRAINING HYBRID (CNN + BiLSTM + Attention)")
     print("="*50)
     
     t_config_hybrid = TrainConfig()

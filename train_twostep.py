@@ -7,23 +7,17 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
-# Import configurations and datasets
-from train_hybrid import TrainConfig, FocalLoss
-from train_hybrid import HybridCandlestickDataset
+from config import TrainConfig
+from utils import FocalLoss, HybridCandlestickDataset
 from models import Hybrid_CNN_LSTM, CustomCandlestickCNN, LSTMBaseline
 from backtester import BacktestConfig, run_backtest
 
 def run_two_step_training():
-    print("="*60)
-    print("PHASE 1: TWO-STEP TRAINING (FROZEN BACKBONES)")
-    print("="*60)
-    
     config = TrainConfig()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # 1. Load Data
-    df = pd.read_csv(config.csv_file)
+    df = pd.read_csv(config.metadata_file)
     df["end_date"] = pd.to_datetime(df["end_date"])
     df = df.sort_values(by="end_date").reset_index(drop=True)
     
@@ -40,25 +34,20 @@ def run_two_step_training():
     train_dataset = HybridCandlestickDataset(train_df, config.img_dir, config.tensor_dir, transform=data_transforms)
     val_dataset = HybridCandlestickDataset(val_df, config.img_dir, config.tensor_dir, transform=data_transforms)
     
-    # Assuming sample_tensor has 11 columns after Z-score fix
     sample_tensor = train_dataset[0][1]
     input_dim = sample_tensor.shape[1]
     
-    # Simple DataLoader for memory efficiency
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4)
     
-    # 2. Initialize Hybrid Model
     model = Hybrid_CNN_LSTM(lstm_input_dim=input_dim, num_classes=config.num_classes)
     
-    # 3. Load pre-trained weights into the backbones
     cnn_path = "best_model_cnn.pth"
     lstm_path = "best_model_lstm.pth"
     
     if os.path.exists(cnn_path):
         cnn_state = torch.load(cnn_path, map_location=device)
         model.cnn.load_state_dict(cnn_state, strict=False)
-        print(f"[+] Loaded CNN weights from {cnn_path}")
     else:
         print(f"[-] Missing {cnn_path}. Exiting.")
         return
@@ -66,35 +55,29 @@ def run_two_step_training():
     if os.path.exists(lstm_path):
         lstm_state = torch.load(lstm_path, map_location=device)
         model.lstm.load_state_dict(lstm_state, strict=False)
-        print(f"[+] Loaded LSTM weights from {lstm_path}")
     else:
         print(f"[-] Missing {lstm_path}. Exiting.")
         return
         
-    # 4. FREEZE BACKBONES
-    print("Freezing CNN and LSTM backbones...")
     for param in model.cnn.parameters():
         param.requires_grad = False
     for param in model.lstm.parameters():
         param.requires_grad = False
         
-    # Verify what is trainable
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters (Fusion Layers Only): {trainable_params}")
     
     model = model.to(device)
     
-    # 5. Setup Optimizer (Only for trainable params!)
     criterion_none = FocalLoss(alpha=config.focal_alpha, gamma=config.focal_gamma, reduction='none')
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=0.001) # Higher LR since we only train few layers
+    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=0.001)
     
     best_val_return = -9999.0
     epochs_no_improve = 0
     save_path = "best_model_hybrid_twostep.pth"
     
-    max_epochs = 30 # Doesn't need 150 since it's just the fusion head
+    max_epochs = 30
     
-    print("\nStarting Phase 1 Training (Fusion Head)...")
     for epoch in range(1, max_epochs + 1):
         model.train()
         train_loss, total_train = 0.0, 0
@@ -116,7 +99,6 @@ def run_two_step_training():
             
         epoch_train_loss = train_loss / total_train
         
-        # Eval
         model.eval()
         all_probs, all_labels, all_pct_changes = [], [], []
         with torch.no_grad():
@@ -132,9 +114,12 @@ def run_two_step_training():
         best_epoch_val_threshold = 0.5
         cost = config.transaction_cost
         
+        all_probs_np = np.array(all_probs)
+        all_pct_changes_np = np.array(all_pct_changes)
+        
         for th in np.arange(0.1, 1.0, 0.1):
-            th_preds = [1 if p >= th else 0 for p in all_probs]
-            th_return = sum((change - cost) for pred, change in zip(th_preds, all_pct_changes) if pred == 1)
+            th_preds = (all_probs_np >= th).astype(int)
+            th_return = np.sum(np.where(th_preds == 1, all_pct_changes_np - cost, 0))
             if th_return > best_epoch_val_return:
                 best_epoch_val_return = th_return
                 best_epoch_val_threshold = th
@@ -144,17 +129,13 @@ def run_two_step_training():
         if best_epoch_val_return > best_val_return:
             best_val_return = best_epoch_val_return
             torch.save(model.state_dict(), save_path)
-            print(f"  [+] Saved new best fusion model -> {best_val_return:+.2f}%")
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
             
         if epochs_no_improve >= 8:
-            print("\n[-] Early stopping triggered for Fusion Head.")
             break
             
-    print("\nTraining Complete. Launching Realistic Backtest...")
-    
     b_config = BacktestConfig()
     b_config.model_type = "hybrid"
     b_config.model_path = save_path

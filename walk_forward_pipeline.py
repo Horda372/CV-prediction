@@ -7,7 +7,8 @@ from torchvision import transforms
 import matplotlib.pyplot as plt
 
 # Import necessary classes and functions from your modules
-from train_hybrid import TrainConfig, train_model, FocalLoss, HybridCandlestickDataset
+from config import TrainConfig
+from utils import FocalLoss, HybridCandlestickDataset
 from backtester import BacktestConfig
 from models import Hybrid_CNN_LSTM, CustomCandlestickCNN, LSTMBaseline
 from train_twostep import run_two_step_training
@@ -60,9 +61,11 @@ def train_fusion_fold(train_dataset, val_dataset, cnn_path, lstm_path, save_path
                 
         # Metric
         best_th_return = -9999.0
+        all_probs_np = np.array(all_probs)
+        all_pct_changes_np = np.array(all_pct_changes)
         for th in [0.5, 0.6, 0.7, 0.8]:
-            th_preds = [1 if p >= th else 0 for p in all_probs]
-            th_return = sum((change - 0.05) for pred, change in zip(th_preds, all_pct_changes) if pred == 1)
+            th_preds = (all_probs_np >= th).astype(int)
+            th_return = np.sum(np.where(th_preds == 1, all_pct_changes_np - 0.05, 0))
             if th_return > best_th_return: best_th_return = th_return
             
         if best_th_return > best_return:
@@ -102,40 +105,54 @@ def backtest_fold(val_df, model_path, input_dim, start_capital, img_dir, tensor_
             
     val_df = val_df.copy()
     val_df["pred_prob"] = all_probs
+    val_df["end_date"] = pd.to_datetime(val_df["end_date"])
+    val_df["trade_exit_date"] = pd.to_datetime(val_df["trade_exit_date"])
+    val_df.sort_values(by="end_date", inplace=True)
     
-    # Simulate
-    # Best generalized threshold from previous experiments is 0.7 for Hybrid
     th = 0.7 
-    capital = start_capital
+    realized_capital = start_capital
+    unrealized_trades = []
     equity_curve = []
     symbol_cooldown = {}
     
     for idx, row in val_df.iterrows():
+        current_date = row["end_date"]
+        
+        still_open = []
+        for trade in unrealized_trades:
+            t_exit_date, t_profit, t_margin = trade
+            if t_exit_date <= current_date:
+                realized_capital += t_profit
+                equity_curve.append(realized_capital)
+            else:
+                still_open.append(trade)
+        unrealized_trades = still_open
+        
         if row["pred_prob"] >= th:
             symbol = row["symbol"]
-            current_date = row["end_date"]
             if symbol in symbol_cooldown and current_date < symbol_cooldown[symbol]:
                 continue
                 
+            avg_sl_pct = 0.01
+            position_size = (realized_capital * 0.02) / avg_sl_pct
+            margin_used = position_size * 0.02 
+            
+            current_locked_margin = sum([t[2] for t in unrealized_trades])
+            if current_locked_margin + margin_used > realized_capital * 0.8:
+                continue 
+                
             symbol_cooldown[symbol] = current_date + pd.Timedelta(days=20)
             
-            exit_type = row["exit_type"]
-            trade_profit = 0.0
-            risk = 0.02
+            transaction_cost = position_size * 0.00007
+            trade_profit = position_size * (row["pct_change"] / 100.0) - transaction_cost
             
-            if exit_type == "TP":
-                trade_profit = capital * risk * 2.0 - (capital * 0.0005)
-            elif exit_type == "SL":
-                trade_profit = - (capital * risk) - (capital * 0.0005)
-            else:
-                if row["pct_change"] > 0: trade_profit = capital * risk * 0.5 - (capital * 0.0005)
-                else: trade_profit = - (capital * risk * 0.5) - (capital * 0.0005)
-                
-            capital += trade_profit
+            unrealized_trades.append((row["trade_exit_date"], trade_profit, margin_used))
             
-        equity_curve.append(capital)
+    for trade in unrealized_trades:
+        realized_capital += trade[1]
+        equity_curve.append(realized_capital)
         
-    return capital, equity_curve
+    return realized_capital, equity_curve
 
 # --- MAIN WALK FORWARD PIPELINE ---
 def main():
